@@ -23,7 +23,6 @@ from rclpy.time import Time
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from foxglove_msgs.msg import Grid, PackedElementField
 from foxglove_msgs.msg import ImageAnnotations, PointsAnnotation, TextAnnotation, Point2, Color
-from foxglove_msgs.msg import SceneUpdate, SceneEntity, KeyValuePair, CubePrimitive, LinePrimitive, ModelPrimitive
 from geometry_msgs.msg import Point
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from geometry_msgs.msg import TransformStamped
@@ -34,6 +33,7 @@ from sensor_msgs.msg import Imu
 from sensor_msgs.msg import NavSatFix, NavSatStatus
 from sensor_msgs.msg import PointCloud2, PointField
 from tf2_msgs.msg import TFMessage
+from visualization_msgs.msg import MarkerArray, Marker
 
 with open(Path(__file__).parent / "turbomap.json") as f:
     TURBOMAP_DATA = np.array(json.load(f))
@@ -551,7 +551,7 @@ def rectContains(rect, point):
     return a <= x < a + c and b <= y < b + d
 
 
-def get_centerline_markers(nusc, scene, nusc_map, stamp):
+def get_centerline_markers(nusc: NuScenes, scene, nusc_map: NuScenesMap, stamp: Time):
     pose_lists = nusc_map.discretize_centerlines(1)
     bbox = scene_bounding_box(nusc, scene, nusc_map)
 
@@ -564,31 +564,30 @@ def get_centerline_markers(nusc, scene, nusc_map, stamp):
         if len(new_pose_list) > 1:
             contained_pose_lists.append(new_pose_list)
 
-    scene_update = SceneUpdate()
+    markers = MarkerArray()
     for i, pose_list in enumerate(contained_pose_lists):
-        entity = SceneEntity()
-        entity.timestamp = stamp.to_msg()
-        entity.frame_id = "map"
-        entity.id = f"{i}"
-        entity.frame_locked = True
-        line = LinePrimitive()
-        line.type = LinePrimitive.LINE_STRIP
-        line.pose.orientation.w = 1.0
-        line.thickness = 0.1
+        marker = Marker()
+        marker.header.stamp = stamp.to_msg()
+        marker.header.frame_id = "map"
+        marker.ns = "centerlines"
+        marker.id = i
+        marker.type = Marker.LINE_STRIP
+        marker.action = Marker.ADD
+        marker.pose.orientation.w = 1.0
+        marker.scale.x = 0.1
+        marker.scale.y = 0.1
+        marker.scale.z = 0.1
+        marker.color.r = 51.0 / 255.0
+        marker.color.g = 160.0 / 255.0
+        marker.color.b = 44.0 / 255.0
+        marker.color.a = 1.0
+        marker.frame_locked = True
         for pose in pose_list:
-            point = Point()
-            point.x = pose[0]
-            point.y = pose[1]
-            point.z = 0.0
-            line.points.append(point)
-        line.color.r = 51.0 / 255.0
-        line.color.g = 160.0 / 255.0
-        line.color.b = 44.0 / 255.0
-        line.color.a = 1.0
-        entity.lines.append(line)
-        scene_update.entities.append(entity)
+            point = Point(x=pose[0], y=pose[1], z=0.0)
+            marker.points.append(point)
+        markers.markers.append(marker)
 
-    return scene_update
+    return markers
 
 
 def find_closest_lidar(nusc, lidar_start_token, stamp_nsec):
@@ -610,23 +609,25 @@ def find_closest_lidar(nusc, lidar_start_token, stamp_nsec):
     return min(candidates, key=lambda x: x[0])[1]
 
 
-def get_car_scene_update(stamp: Time) -> SceneUpdate:
-    scene_update = SceneUpdate()
-    entity = SceneEntity()
-    entity.frame_id = "base_link"
-    entity.timestamp = stamp.to_msg()
-    entity.id = "car"
-    entity.frame_locked = True
-    model = ModelPrimitive()
-    model.pose.position.x = 1.0
-    model.pose.orientation.w = 1.0
-    model.scale.x = 1.0
-    model.scale.y = 1.0
-    model.scale.z = 1.0
-    model.url = "https://assets.foxglove.dev/NuScenes_car_uncompressed.glb"
-    entity.models.append(model)
-    scene_update.entities.append(entity)
-    return scene_update
+def get_car_scene_update(stamp: Time):
+    markers = MarkerArray()
+    marker = Marker()
+    marker.header.stamp = stamp.to_msg()
+    marker.header.frame_id = "base_link"
+    marker.ns = "ego"
+    marker.type = Marker.MESH_RESOURCE
+    marker.action = Marker.ADD
+    marker.pose.position.x = 1.3
+    marker.pose.orientation.w = 1.0
+    marker.scale.x = 1.0
+    marker.scale.y = 1.0
+    marker.scale.z = 1.0
+    marker.color.a = 1.0
+    marker.frame_locked = True
+    marker.mesh_resource = "https://assets.foxglove.dev/NuScenes_car_uncompressed.glb"
+    marker.mesh_use_embedded_materials = True
+    markers.markers.append(marker)
+    return markers
 
 
 class Collector:
@@ -693,7 +694,7 @@ def write_scene_to_mcap(nusc: NuScenes, nusc_can: NuScenesCanBus, scene, filepat
     # Create topics
     latch_qos = rosbag2_py._storage.QoS(1).transient_local()
     writer.create_topic(rosbag2_py.TopicMetadata(0, "/map", "foxglove_msgs/msg/Grid", "cdr", [latch_qos]))
-    writer.create_topic(rosbag2_py.TopicMetadata(0, "/semantic_map", "foxglove_msgs/msg/SceneUpdate", "cdr", [latch_qos]))
+    writer.create_topic(rosbag2_py.TopicMetadata(0, "/semantic_map", "visualization_msgs/msg/MarkerArray", "cdr", [latch_qos]))
     writer.create_topic(rosbag2_py.TopicMetadata(0, "/imu", "sensor_msgs/msg/Imu", "cdr"))
     writer.create_topic(rosbag2_py.TopicMetadata(0, "/odom", "nav_msgs/msg/Odometry", "cdr"))
     writer.create_topic(rosbag2_py.TopicMetadata(0, "/pose", "geometry_msgs/msg/PoseWithCovarianceStamped", "cdr"))
@@ -739,8 +740,8 @@ def write_scene_to_mcap(nusc: NuScenes, nusc_can: NuScenesCanBus, scene, filepat
     writer.create_topic(rosbag2_py.TopicMetadata(0, "/CAM_FRONT_LEFT/annotations", "foxglove_msgs/msg/ImageAnnotations", "cdr"))
 
     writer.create_topic(rosbag2_py.TopicMetadata(0, "/gps", "sensor_msgs/msg/NavSatFix", "cdr"))
-    writer.create_topic(rosbag2_py.TopicMetadata(0, "/markers/annotations", "foxglove_msgs/msg/SceneUpdate", "cdr"))
-    writer.create_topic(rosbag2_py.TopicMetadata(0, "/markers/car", "foxglove_msgs/msg/SceneUpdate", "cdr"))
+    writer.create_topic(rosbag2_py.TopicMetadata(0, "/markers/annotations", "visualization_msgs/msg/MarkerArray", "cdr"))
+    writer.create_topic(rosbag2_py.TopicMetadata(0, "/markers/car", "visualization_msgs/msg/MarkerArray", "cdr"))
 
     # writer.add_metadata(
     #     "scene-info",
@@ -832,40 +833,36 @@ def write_scene_to_mcap(nusc: NuScenes, nusc_can: NuScenesCanBus, scene, filepat
         writer.write("/gps", serialize_message(gps), stamp.nanoseconds)
 
         # publish /markers/annotations
-        scene_update = SceneUpdate()
+        markers = MarkerArray()
         for annotation_id in cur_sample["anns"]:
             ann = nusc.get("sample_annotation", annotation_id)
             marker_id = ann["instance_token"][:4]
-            c = np.array(nusc.explorer.get_color(ann["category_name"])) / 255.0
+            color = np.array(nusc.explorer.get_color(ann["category_name"])) / 255.0
 
-            entity = SceneEntity()
-            entity.timestamp = stamp.to_msg()
-            entity.frame_id = "map"
-            entity.id = marker_id
-            entity.lifetime.sec = 1
-            entity.frame_locked = True
-            metadata = KeyValuePair()
-            metadata.key = "category"
-            metadata.value = ann["category_name"]
-            entity.metadata.append(metadata)
-            cube = CubePrimitive()
-            cube.pose.position.x = ann["translation"][0]
-            cube.pose.position.y = ann["translation"][1]
-            cube.pose.position.z = ann["translation"][2]
-            cube.pose.orientation.w = ann["rotation"][0]
-            cube.pose.orientation.x = ann["rotation"][1]
-            cube.pose.orientation.y = ann["rotation"][2]
-            cube.pose.orientation.z = ann["rotation"][3]
-            cube.size.x = ann["size"][1]
-            cube.size.y = ann["size"][0]
-            cube.size.z = ann["size"][2]
-            cube.color.r = c[0]
-            cube.color.g = c[1]
-            cube.color.b = c[2]
-            cube.color.a = 0.5
-            entity.cubes.append(cube)
-            scene_update.entities.append(entity)
-        writer.write("/markers/annotations", serialize_message(scene_update), stamp.nanoseconds)
+            marker = Marker()
+            marker.header.stamp = stamp.to_msg()
+            marker.header.frame_id = "map"
+            marker.ns = "cube"
+            marker.id = int(marker_id, 16)
+            marker.type = Marker.CUBE
+            marker.action = Marker.ADD
+            marker.pose.position.x = ann["translation"][0]
+            marker.pose.position.y = ann["translation"][1]
+            marker.pose.position.z = ann["translation"][2]
+            marker.pose.orientation.w = ann["rotation"][0]
+            marker.pose.orientation.x = ann["rotation"][1]
+            marker.pose.orientation.y = ann["rotation"][2]
+            marker.pose.orientation.z = ann["rotation"][3]
+            marker.scale.x = ann["size"][1]
+            marker.scale.y = ann["size"][0]
+            marker.scale.z = ann["size"][2]
+            marker.color.r = color[0]
+            marker.color.g = color[1]
+            marker.color.b = color[2]
+            marker.color.a = 0.5
+            marker.lifetime.sec = 1
+            markers.markers.append(marker)
+        writer.write("/markers/annotations", serialize_message(markers), stamp.nanoseconds)
 
         # publish /markers/car
         marker_car_msg = get_car_scene_update(stamp)
