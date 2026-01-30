@@ -13,7 +13,7 @@ from tqdm import tqdm
 
 from nuscenes.can_bus.can_bus_api import NuScenesCanBus
 from nuscenes.eval.common.utils import quaternion_yaw
-from nuscenes.map_expansion.map_api import NuScenesMap
+from nuscenes.map_expansion.map_api import NuScenesMap, NuScenesMapExplorer
 from nuscenes.nuscenes import NuScenes
 
 import rosbag2_py
@@ -261,7 +261,7 @@ def get_lidar(data_path, sample_data, frame_id) -> PointCloud2:
     return msg
 
 
-def get_lidar_image_annotations(nusc, sample_lidar, sample_data, frame_id):
+def get_lidar_image_annotations(nusc, sample_lidar, sample_data):
     # lidar image markers in camera frame
     points, coloring, _ = nusc.explorer.map_pointcloud_to_image(
         pointsensor_token=sample_lidar["token"],
@@ -294,7 +294,7 @@ def get_lidar_image_annotations(nusc, sample_lidar, sample_data, frame_id):
     return msg
 
 
-def write_boxes_image_annotations(nusc, writer, anns, sample_data, frame_id, topic_ns, stamp):
+def get_boxes_image_annotations(nusc, sample_data):
     timestamp = get_time(sample_data)
 
     msg = ImageAnnotations()
@@ -340,10 +340,10 @@ def write_boxes_image_annotations(nusc, writer, anns, sample_data, frame_id, top
         msg.texts.append(texts_ann)
     msg.points.append(points_ann)
 
-    writer.write(topic_ns + "/annotations", serialize_message(msg), timestamp.nanoseconds)
+    return msg
 
 
-def write_drivable_area(writer, nusc_map, ego_pose, stamp):
+def get_drivable_area(nusc_map, ego_pose, stamp):
     translation = ego_pose["translation"]
     rotation = Quaternion(ego_pose["rotation"])
     yaw_radians = quaternion_yaw(rotation)
@@ -372,7 +372,7 @@ def write_drivable_area(writer, nusc_map, ego_pose, stamp):
     msg.fields.append(PackedElementField(name="drivable_area", offset=0, type=PackedElementField.UINT8))
     msg.data = drivable_area.astype(np.uint8).tobytes()
 
-    writer.write("/drivable_area", serialize_message(msg), stamp.nanoseconds)
+    return msg
 
 
 def get_imu_msg(imu_data):
@@ -630,6 +630,157 @@ def get_car_scene_update(stamp: Time):
     return markers
 
 
+def get_annotation_markers(nusc: NuScenes, anns, stamp: Time):
+    markers = MarkerArray()
+    for annotation_id in anns:
+        ann = nusc.get("sample_annotation", annotation_id)
+        marker_id = ann["instance_token"][:4]
+        color = np.array(nusc.explorer.get_color(ann["category_name"])) / 255.0
+
+        marker = Marker()
+        marker.header.stamp = stamp.to_msg()
+        marker.header.frame_id = "map"
+        marker.ns = ann["category_name"]
+        marker.id = int(marker_id, 16)
+        marker.type = Marker.CUBE
+        marker.action = Marker.ADD
+        marker.pose.position.x = ann["translation"][0]
+        marker.pose.position.y = ann["translation"][1]
+        marker.pose.position.z = ann["translation"][2]
+        marker.pose.orientation.w = ann["rotation"][0]
+        marker.pose.orientation.x = ann["rotation"][1]
+        marker.pose.orientation.y = ann["rotation"][2]
+        marker.pose.orientation.z = ann["rotation"][3]
+        marker.scale.x = ann["size"][1]
+        marker.scale.y = ann["size"][0]
+        marker.scale.z = ann["size"][2]
+        marker.color.r = color[0]
+        marker.color.g = color[1]
+        marker.color.b = color[2]
+        marker.color.a = 0.5
+        marker.lifetime.sec = 1
+        markers.markers.append(marker)
+    return markers
+
+
+def get_vector_map(map_explorer: NuScenesMapExplorer, ego_pose, stamp: Time):
+    translation = ego_pose["translation"]
+    rotation = Quaternion(ego_pose["rotation"])
+    patch_box = (translation[0], translation[1], 100, 100)
+    yaw = quaternion_yaw(rotation) / np.pi * 180
+    msg = MarkerArray()
+
+    lane_divider = map_explorer._get_layer_line(patch_box, yaw, "lane_divider")
+    for i, line in enumerate(lane_divider):
+        marker = Marker()
+        marker.header.stamp = stamp.to_msg()
+        marker.header.frame_id = "base_link"
+        marker.ns = "lane_divider"
+        marker.id = i
+        marker.type = Marker.LINE_STRIP
+        marker.action = Marker.ADD
+        marker.pose.orientation.w = 1.0
+        marker.scale.x = 0.2
+        marker.color.r = 0.8
+        marker.color.g = 0.8
+        marker.color.b = 0.8
+        marker.color.a = 1.0
+        marker.lifetime.sec = 1
+        for point in line.coords:
+            point = Point(x=point[0], y=point[1], z=0.0)
+            marker.points.append(point)
+        msg.markers.append(marker)
+
+    road_divider = map_explorer._get_layer_line(patch_box, yaw, "road_divider")
+    for i, line in enumerate(road_divider):
+        marker = Marker()
+        marker.header.stamp = stamp.to_msg()
+        marker.header.frame_id = "base_link"
+        marker.ns = "road_divider"
+        marker.id = i
+        marker.type = Marker.LINE_STRIP
+        marker.action = Marker.ADD
+        marker.pose.orientation.w = 1.0
+        marker.scale.x = 0.2
+        marker.color.r = 0.8
+        marker.color.g = 0.8
+        marker.color.b = 0.8
+        marker.color.a = 1.0
+        marker.lifetime.sec = 1
+        for point in line.coords:
+            point = Point(x=point[0], y=point[1], z=0.0)
+            marker.points.append(point)
+        msg.markers.append(marker)
+
+    ped_crossing = map_explorer._get_layer_polygon(patch_box, yaw, "ped_crossing")
+    for i, multipolygon in enumerate(ped_crossing):
+        for polygon in multipolygon.geoms:
+            marker = Marker()
+            marker.header.stamp = stamp.to_msg()
+            marker.header.frame_id = "base_link"
+            marker.ns = "ped_crossing"
+            marker.id = i
+            marker.type = Marker.LINE_STRIP
+            marker.action = Marker.ADD
+            marker.pose.orientation.w = 1.0
+            marker.scale.x = 0.2
+            marker.color.r = 0.0
+            marker.color.g = 0.4
+            marker.color.b = 0.8
+            marker.color.a = 1.0
+            marker.lifetime.sec = 1
+            for point in polygon.exterior.coords:
+                point = Point(x=point[0], y=point[1], z=0.0)
+                marker.points.append(point)
+            msg.markers.append(marker)
+
+    road_segment = map_explorer._get_layer_polygon(patch_box, yaw, "road_segment")
+    for i, multipolygon in enumerate(road_segment):
+        for polygon in multipolygon.geoms:
+            marker = Marker()
+            marker.header.stamp = stamp.to_msg()
+            marker.header.frame_id = "base_link"
+            marker.ns = "road_segment"
+            marker.id = i
+            marker.type = Marker.LINE_STRIP
+            marker.action = Marker.ADD
+            marker.pose.orientation.w = 1.0
+            marker.scale.x = 0.2
+            marker.color.r = 1.0
+            marker.color.g = 0.0
+            marker.color.b = 0.0
+            marker.color.a = 1.0
+            marker.lifetime.sec = 1
+            for point in polygon.exterior.coords:
+                point = Point(x=point[0], y=point[1], z=0.0)
+                marker.points.append(point)
+            msg.markers.append(marker)
+
+    lane = map_explorer._get_layer_polygon(patch_box, yaw, "lane")
+    for i, multipolygon in enumerate(lane):
+        for polygon in multipolygon.geoms:
+            marker = Marker()
+            marker.header.stamp = stamp.to_msg()
+            marker.header.frame_id = "base_link"
+            marker.ns = "lane"
+            marker.id = i
+            marker.type = Marker.LINE_STRIP
+            marker.action = Marker.ADD
+            marker.pose.orientation.w = 1.0
+            marker.scale.x = 0.2
+            marker.color.r = 0.6
+            marker.color.g = 0.4
+            marker.color.b = 0.8
+            marker.color.a = 1.0
+            marker.lifetime.sec = 1
+            for point in polygon.exterior.coords:
+                point = Point(x=point[0], y=point[1], z=0.0)
+                marker.points.append(point)
+            msg.markers.append(marker)
+
+    return msg
+
+
 class Collector:
     """
     Emulates the Matplotlib Axes class to collect line data.
@@ -665,13 +816,11 @@ def write_scene_to_mcap(nusc: NuScenes, nusc_can: NuScenesCanBus, scene, filepat
     print(f"Loading map {location}")
     data_path = Path(nusc.dataroot)
     nusc_map = NuScenesMap(dataroot=data_path, map_name=location)
+    map_explorer = NuScenesMapExplorer(nusc_map)
     print(f"Loading bitmap {nusc_map.map_name}")
     image = load_bitmap(nusc_map.dataroot, nusc_map.map_name, "basemap")
     print(f"Loaded {image.shape} bitmap")
     print(f"Vehicle model is {log['vehicle']}")
-
-    cur_sample = nusc.get("sample", scene["first_sample_token"])
-    pbar = tqdm(total=get_num_sample_data(nusc, scene), desc=f"Processing {scene_name}")
 
     can_parsers = [
         [nusc_can.get_messages(scene_name, "ms_imu"), 0, get_imu_msg],
@@ -699,9 +848,9 @@ def write_scene_to_mcap(nusc: NuScenes, nusc_can: NuScenesCanBus, scene, filepat
     writer.create_topic(rosbag2_py.TopicMetadata(0, "/odom", "nav_msgs/msg/Odometry", "cdr"))
     writer.create_topic(rosbag2_py.TopicMetadata(0, "/pose", "geometry_msgs/msg/PoseWithCovarianceStamped", "cdr"))
     writer.create_topic(rosbag2_py.TopicMetadata(0, "/diagnostics", "diagnostic_msgs/msg/DiagnosticArray", "cdr"))
-    writer.create_topic(rosbag2_py.TopicMetadata(0, "/tf", "geometry_msgs/msg/TransformStamped", "cdr"))
+    writer.create_topic(rosbag2_py.TopicMetadata(0, "/tf", "tf2_msgs/msg/TFMessage", "cdr"))
     writer.create_topic(rosbag2_py.TopicMetadata(0, "/tf_static", "tf2_msgs/msg/TFMessage", "cdr", [latch_qos]))
-    writer.create_topic(rosbag2_py.TopicMetadata(0, "/drivable_area", "foxglove_msgs/msg/Grid", "cdr", [latch_qos]))
+    writer.create_topic(rosbag2_py.TopicMetadata(0, "/drivable_area", "foxglove_msgs/msg/Grid", "cdr"))
 
     writer.create_topic(rosbag2_py.TopicMetadata(0, "/RADAR_FRONT", "sensor_msgs/msg/PointCloud2", "cdr"))
     writer.create_topic(rosbag2_py.TopicMetadata(0, "/RADAR_FRONT_LEFT", "sensor_msgs/msg/PointCloud2", "cdr"))
@@ -742,6 +891,7 @@ def write_scene_to_mcap(nusc: NuScenes, nusc_can: NuScenesCanBus, scene, filepat
     writer.create_topic(rosbag2_py.TopicMetadata(0, "/gps", "sensor_msgs/msg/NavSatFix", "cdr"))
     writer.create_topic(rosbag2_py.TopicMetadata(0, "/markers/annotations", "visualization_msgs/msg/MarkerArray", "cdr"))
     writer.create_topic(rosbag2_py.TopicMetadata(0, "/markers/car", "visualization_msgs/msg/MarkerArray", "cdr"))
+    writer.create_topic(rosbag2_py.TopicMetadata(0, "/markers/map", "visualization_msgs/msg/MarkerArray", "cdr"))
 
     # writer.add_metadata(
     #     "scene-info",
@@ -754,27 +904,32 @@ def write_scene_to_mcap(nusc: NuScenes, nusc_can: NuScenesCanBus, scene, filepat
     #     },
     # )
 
-    stamp = get_time(
-        nusc.get(
-            "ego_pose",
-            nusc.get("sample_data", cur_sample["data"]["LIDAR_TOP"])["ego_pose_token"],
-        )
-    )
-    map_msg = get_scene_map(nusc, scene, nusc_map, image, stamp)
-    centerlines_msg = get_centerline_markers(nusc, scene, nusc_map, stamp)
-    writer.write("/map", serialize_message(map_msg), stamp.nanoseconds)
-    writer.write("/semantic_map", serialize_message(centerlines_msg), stamp.nanoseconds)
+    pbar = tqdm(total=get_num_sample_data(nusc, scene), desc=f"Processing {scene_name}")
+    cur_sample = nusc.get("sample", scene["first_sample_token"])
+    cur_stamp = get_time(cur_sample)
+
+    msg = TFMessage()
+    for sensor_id, sample_token in cur_sample["data"].items():
+        sample_data = nusc.get("sample_data", sample_token)
+        msg.transforms.append(get_sensor_tf(nusc, sensor_id, sample_data))
+    writer.write("/tf_static", serialize_message(msg), cur_stamp.nanoseconds)
+
+    msg = get_scene_map(nusc, scene, nusc_map, image, cur_stamp)
+    writer.write("/map", serialize_message(msg), cur_stamp.nanoseconds)
+
+    msg = get_centerline_markers(nusc, scene, nusc_map, cur_stamp)
+    writer.write("/semantic_map", serialize_message(msg), cur_stamp.nanoseconds)
 
     while cur_sample is not None:
+        cur_stamp = get_time(cur_sample)
         sample_lidar = nusc.get("sample_data", cur_sample["data"]["LIDAR_TOP"])
         ego_pose = nusc.get("ego_pose", sample_lidar["ego_pose_token"])
-        stamp = get_time(ego_pose)
 
         # write CAN messages to /imu, /odom, /pose, and /diagnostics
         can_msg_events = []
         for i in range(len(can_parsers)):
             (can_msgs, index, msg_func) = can_parsers[i]
-            while index < len(can_msgs) and get_utime(can_msgs[index]) < stamp:
+            while index < len(can_msgs) and get_utime(can_msgs[index]) < cur_stamp:
                 can_msg_events.append(msg_func(can_msgs[index]))
                 index += 1
                 can_parsers[i][1] = index
@@ -782,15 +937,38 @@ def write_scene_to_mcap(nusc: NuScenes, nusc_can: NuScenesCanBus, scene, filepat
         for timestamp, topic, msg in can_msg_events:
             writer.write(topic, serialize_message(msg), timestamp.nanoseconds)
 
-        # publish /tf
-        tf_msg = get_ego_tf(ego_pose)
-        writer.write("/tf", serialize_message(tf_msg), stamp.nanoseconds)
+        # publish /gps
+        lat, lon, att = derive_lla(location, ego_pose)
+        gps = NavSatFix()
+        gps.header.stamp = cur_stamp.to_msg()
+        gps.header.frame_id = "base_link"
+        gps.status.status = NavSatStatus.STATUS_GBAS_FIX
+        gps.status.service = NavSatStatus.SERVICE_GPS
+        gps.latitude = lat
+        gps.longitude = lon
+        gps.altitude = att
+        writer.write("/gps", serialize_message(gps), cur_stamp.nanoseconds)
+
+        # publish /markers/car
+        msg = get_car_scene_update(cur_stamp)
+        writer.write("/markers/car", serialize_message(msg), cur_stamp.nanoseconds)
+
+        # publish /markers/annotations
+        msg = get_annotation_markers(nusc, cur_sample["anns"], cur_stamp)
+        writer.write("/markers/annotations", serialize_message(msg), cur_stamp.nanoseconds)
+
+        # publish /markers/map
+        msg = get_vector_map(map_explorer, ego_pose, cur_stamp)
+        writer.write("/markers/map", serialize_message(msg), cur_stamp.nanoseconds)
 
         # /driveable_area occupancy grid
-        write_drivable_area(writer, nusc_map, ego_pose, stamp)
+        msg = get_drivable_area(nusc_map, ego_pose, cur_stamp)
+        writer.write("/drivable_area", serialize_message(msg), cur_stamp.nanoseconds)
 
-        # create sensor transform
-        tf_static_msg = TFMessage()
+        # publish /tf
+        tf_msg = TFMessage()
+        tf_msg.transforms.append(get_ego_tf(ego_pose))
+        writer.write("/tf", serialize_message(tf_msg), cur_stamp.nanoseconds)
 
         # iterate sensors
         for sensor_id, sample_token in cur_sample["data"].items():
@@ -798,75 +976,22 @@ def write_scene_to_mcap(nusc: NuScenes, nusc_can: NuScenesCanBus, scene, filepat
             sample_data = nusc.get("sample_data", sample_token)
             topic = "/" + sensor_id
 
-            # append sensor transform
-            tf_static_msg.transforms.append(get_sensor_tf(nusc, sensor_id, sample_data))
-
             # write the sensor data
             if sample_data["sensor_modality"] == "radar":
                 msg = get_radar(data_path, sample_data, sensor_id)
-                writer.write(topic, serialize_message(msg), stamp.nanoseconds)
+                writer.write(topic, serialize_message(msg), cur_stamp.nanoseconds)
             elif sample_data["sensor_modality"] == "lidar":
                 msg = get_lidar(data_path, sample_data, sensor_id)
-                writer.write(topic, serialize_message(msg), stamp.nanoseconds)
+                writer.write(topic, serialize_message(msg), cur_stamp.nanoseconds)
             elif sample_data["sensor_modality"] == "camera":
                 msg = get_camera(data_path, sample_data, sensor_id)
-                writer.write(topic + "/compressed", serialize_message(msg), stamp.nanoseconds)
+                writer.write(topic + "/compressed", serialize_message(msg), cur_stamp.nanoseconds)
                 msg = get_camera_info(nusc, sample_data, sensor_id)
-                writer.write(topic + "/camera_info", serialize_message(msg), stamp.nanoseconds)
-                msg = get_lidar_image_annotations(nusc, sample_lidar, sample_data, sensor_id)
-                writer.write(topic + "/lidar", serialize_message(msg), stamp.nanoseconds)
-                write_boxes_image_annotations(nusc, writer, cur_sample["anns"], sample_data, sensor_id, topic, stamp)
-
-        # publish sensor transform
-        writer.write("/tf_static", serialize_message(tf_static_msg), stamp.nanoseconds)
-
-        # publish /gps
-        lat, lon, att = derive_lla(location, ego_pose)
-        gps = NavSatFix()
-        gps.header.stamp = stamp.to_msg()
-        gps.header.frame_id = "base_link"
-        gps.status.status = NavSatStatus.STATUS_GBAS_FIX
-        gps.status.service = NavSatStatus.SERVICE_GPS
-        gps.latitude = lat
-        gps.longitude = lon
-        gps.altitude = att
-        writer.write("/gps", serialize_message(gps), stamp.nanoseconds)
-
-        # publish /markers/annotations
-        markers = MarkerArray()
-        for annotation_id in cur_sample["anns"]:
-            ann = nusc.get("sample_annotation", annotation_id)
-            marker_id = ann["instance_token"][:4]
-            color = np.array(nusc.explorer.get_color(ann["category_name"])) / 255.0
-
-            marker = Marker()
-            marker.header.stamp = stamp.to_msg()
-            marker.header.frame_id = "map"
-            marker.ns = "cube"
-            marker.id = int(marker_id, 16)
-            marker.type = Marker.CUBE
-            marker.action = Marker.ADD
-            marker.pose.position.x = ann["translation"][0]
-            marker.pose.position.y = ann["translation"][1]
-            marker.pose.position.z = ann["translation"][2]
-            marker.pose.orientation.w = ann["rotation"][0]
-            marker.pose.orientation.x = ann["rotation"][1]
-            marker.pose.orientation.y = ann["rotation"][2]
-            marker.pose.orientation.z = ann["rotation"][3]
-            marker.scale.x = ann["size"][1]
-            marker.scale.y = ann["size"][0]
-            marker.scale.z = ann["size"][2]
-            marker.color.r = color[0]
-            marker.color.g = color[1]
-            marker.color.b = color[2]
-            marker.color.a = 0.5
-            marker.lifetime.sec = 1
-            markers.markers.append(marker)
-        writer.write("/markers/annotations", serialize_message(markers), stamp.nanoseconds)
-
-        # publish /markers/car
-        marker_car_msg = get_car_scene_update(stamp)
-        writer.write("/markers/car", serialize_message(marker_car_msg), stamp.nanoseconds)
+                writer.write(topic + "/camera_info", serialize_message(msg), cur_stamp.nanoseconds)
+                msg = get_lidar_image_annotations(nusc, sample_lidar, sample_data)
+                writer.write(topic + "/lidar", serialize_message(msg), cur_stamp.nanoseconds)
+                msg = get_boxes_image_annotations(nusc, sample_data)
+                writer.write(topic + "/annotations", serialize_message(msg), cur_stamp.nanoseconds)
 
         # collect all sensor frames after this sample but before the next sample
         non_keyframe_sensor_msgs = []
@@ -876,14 +1001,15 @@ def write_scene_to_mcap(nusc: NuScenes, nusc_can: NuScenesCanBus, scene, filepat
             next_sample_token = nusc.get("sample_data", sample_token)["next"]
             while next_sample_token != "":
                 next_sample_data = nusc.get("sample_data", next_sample_token)
-
                 if next_sample_data["is_key_frame"]:
                     break
 
                 pbar.update(1)
                 ego_pose = nusc.get("ego_pose", next_sample_data["ego_pose_token"])
-                ego_tf = get_ego_tf(ego_pose)
-                non_keyframe_sensor_msgs.append((Time.from_msg(ego_tf.header.stamp).nanoseconds, "/tf", ego_tf))
+
+                tf_msg = TFMessage()
+                tf_msg.transforms.append(get_ego_tf(ego_pose))
+                non_keyframe_sensor_msgs.append((get_time(ego_pose).nanoseconds, "/tf", tf_msg))
 
                 if next_sample_data["sensor_modality"] == "radar":
                     msg = get_radar(data_path, next_sample_data, sensor_id)
