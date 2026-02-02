@@ -965,16 +965,17 @@ def write_scene_to_mcap(nusc: NuScenes, nusc_can: NuScenesCanBus, scene, filepat
         msg = get_drivable_area(nusc_map, ego_pose, cur_stamp)
         writer.write("/drivable_area", serialize_message(msg), cur_stamp.nanoseconds)
 
-        # publish /tf
-        tf_msg = TFMessage()
-        tf_msg.transforms.append(get_ego_tf(ego_pose))
-        writer.write("/tf", serialize_message(tf_msg), cur_stamp.nanoseconds)
-
         # iterate sensors
         for sensor_id, sample_token in cur_sample["data"].items():
             pbar.update(1)
             sample_data = nusc.get("sample_data", sample_token)
             topic = "/" + sensor_id
+            ego_pose = nusc.get("ego_pose", sample_data["ego_pose_token"])
+
+            # publish /tf
+            tf_msg = TFMessage()
+            tf_msg.transforms.append(get_ego_tf(ego_pose))
+            writer.write("/tf", serialize_message(tf_msg), cur_stamp.nanoseconds)
 
             # write the sensor data
             if sample_data["sensor_modality"] == "radar":
