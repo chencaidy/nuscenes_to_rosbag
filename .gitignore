@@ -257,5 +257,6 @@ AMENT_IGNORE
 
 # End of https://www.toptal.com/developers/gitignore/api/python,macos,ros2,visualstudiocode
 
-data/
-output/
+data
+output
+test
